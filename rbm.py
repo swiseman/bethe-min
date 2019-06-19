@@ -697,8 +697,6 @@ def main(args, trdat, valdat, nvis, ne):
             bin_margs = tau_e[0][:, 1, 1] # nedges
             pred_un_margs = predtau_u[0][:, 1] # T
             pred_bin_margs = predtau_e[0].view(-1, 2, 2)[:, 1, 1] # nedges
-            # print("dufuq", tau_u.size(), predtau_u.size(), un_margs.size(), pred_un_margs.size())
-            # print("srsly", tau_e.size(), predtau_e.size(), bin_margs.size(), pred_bin_margs.size())
             print(i, "unary corr: %.4f, binary corr: %.4f" %
                   (corr(un_margs, pred_un_margs),
                    corr(bin_margs, pred_bin_margs)))
