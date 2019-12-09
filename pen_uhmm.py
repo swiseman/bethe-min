@@ -2,6 +2,7 @@ import os
 import math
 import argparse
 from collections import OrderedDict
+import time
 
 import torch
 import torch.nn as nn
@@ -256,7 +257,7 @@ def inner_lossx(rho, un_lpots, ed_lpots, nodeidxs, K, ne, neginf, penfunc):
 
 
 # alternates minimizing over rho_x, theta, and maxing over rho
-def train_unsup_am(corpus, model, infnet, moptim, ioptim, cache, penfunc, neginf, device, args):
+def train_unsup_am(corpus, model, infnet, optimizer, cache, penfunc, neginf, device, args):
     """
     opt is just gonna be for everyone
     """
@@ -283,11 +284,8 @@ def train_unsup_am(corpus, model, infnet, moptim, ioptim, cache, penfunc, neginf
         with torch.no_grad():
             ed_lpots = model.get_edge_scores(edges, T) # nedges x K*K log potentials
 
-        # if args.reset_adam:
-        #     ioptim = torch.optim.Adam(infnet.parameters(), lr=args.ilr)
-
-        for _ in range(args.z_iter):
-            ioptim.zero_grad()
+        for _ in range(args.inf_iter):
+            optimizer.zero_grad()
             pred_rho = infnet.q(edges, T) # nedges x K^2 logits
             in_loss, ipen_loss = inner_lossz(pred_rho.view(1, -1), ed_lpots.view(1, -1), nodeidxs,
                                              K, ne, neginf, penfunc)
@@ -295,9 +293,8 @@ def train_unsup_am(corpus, model, infnet, moptim, ioptim, cache, penfunc, neginf
             total_pen_loss += args.pen_mult/npenterms * ipen_loss.item()*bsz
             in_loss = in_loss + args.pen_mult/npenterms * ipen_loss
             in_loss.backward()
-            clip_opt_params(ioptim, args.clip)
-            ioptim.step()
-
+            clip_opt_params(optimizer, args.clip)
+            optimizer.step()
         pred_rho = pred_rho.detach()
 
         if args.loss == "alt3":
@@ -305,8 +302,8 @@ def train_unsup_am(corpus, model, infnet, moptim, ioptim, cache, penfunc, neginf
             with torch.no_grad():
                 un_lpots = model.get_obs_lps(batch) # bsz x T x K log unary potentials
 
-            for _ in range(args.zx_iter):
-                ioptim.zero_grad()
+            for _ in range(args.inf_iter):
+                optimizer.zero_grad()
                 pred_rho_x = infnet.qx(batch, edges, T)
                 out_loss1, open_loss1 = inner_lossx(
                     pred_rho_x, un_lpots.view(bsz, -1), ed_lpots.view(1, -1).expand(bsz, -1),
@@ -314,12 +311,12 @@ def train_unsup_am(corpus, model, infnet, moptim, ioptim, cache, penfunc, neginf
                 out_loss1 = out_loss1 + args.pen_mult/npenterms * open_loss1
                 total_pen_loss += args.pen_mult/npenterms * open_loss1.item()
                 out_loss1.div(bsz).backward()
-                clip_opt_params(ioptim, args.clip)
-                ioptim.step()
+                clip_opt_params(optimizer, args.clip)
+                optimizer.step()
             pred_rho_x = pred_rho_x.detach()
 
         # min wrt params
-        moptim.zero_grad()
+        optimizer.zero_grad()
         # even tho these don't change we needa do it again
         un_lpots = model.get_obs_lps(batch) # bsz x T x K log unary potentials
         ed_lpots = model.get_edge_scores(edges, T) # nedges x K*K log potentials
@@ -338,8 +335,8 @@ def train_unsup_am(corpus, model, infnet, moptim, ioptim, cache, penfunc, neginf
             total_pen_loss += args.pen_mult/npenterms * open_loss
         out_loss = out_loss + args.pen_mult/npenterms * open_loss
         out_loss.div(bsz).backward()
-        clip_opt_params(moptim, args.clip)
-        moptim.step()
+        clip_opt_params(optimizer, args.clip)
+        optimizer.step()
         nexamples += bsz
 
         if (i+1) % args.log_interval == 0:
@@ -499,7 +496,7 @@ def lbp_validate(corpus, model, helper, device):
 
 def exact_train(corpus, model, optim, helper, device, args):
     model.train()
-    ll, ntokens = 0.0, 0
+    ll, ntokens, nex = 0.0, 0, 0
     perm = torch.randperm(len(corpus))
     for i, idx in enumerate(perm):
         # if i > 1:
@@ -524,16 +521,17 @@ def exact_train(corpus, model, optim, helper, device, args):
         ll += logmarg.item()
         logmarg.div(-bsz).backward()
         ntokens += batch.nelement()
+        nex += bsz
         clip_opt_params(optim, args.clip)
         optim.step()
         if (i+1) % args.log_interval == 0:
             print("{:5d}/{:5d} | lr {:02.4f} | ppl {:8.2f}".format(
                 i+1, perm.size(0), args.lr, math.exp(-ll/ntokens)))
-    return ll, ntokens
+    return ll, nex, ntokens
 
 def exact_validate(corpus, model, helper, device):
     model.eval()
-    ll, ntokens = 0.0, 0
+    ll, ntokens, nex = 0.0, 0, 0
     for i in range(len(corpus)):
         batch = corpus[i].to(device)
         T, bsz = batch.size()
@@ -554,7 +552,8 @@ def exact_validate(corpus, model, helper, device):
         logmarg = (lnZx - lnZ).sum()
         ll += logmarg.item()
         ntokens += batch.nelement()
-    return ll, ntokens
+        nex += bsz
+    return ll, nex, ntokens
 
 parser = argparse.ArgumentParser(description='')
 parser.add_argument('-data', type=str, default="/scratch/data/ptb/",
@@ -583,8 +582,8 @@ parser.add_argument('-t_hid_size', type=int, default=100, help='transition hid s
 parser.add_argument('-K', type=int, default=45, help='')
 parser.add_argument('-markov_order', type=int, default=1, help='')
 
-parser.add_argument('-optalg', type=str, default='sgd', choices=["sgd", "adam"], help='')
-parser.add_argument('-loss', type=str, default='alt3',
+parser.add_argument('-optalg', type=str, default='sgd', choices=["sgd", "adagrad", "adam"], help='')
+parser.add_argument('-loss', type=str, default='alt2',
                     choices=["exact", "lbp", "alt2", "alt3"], help='')
 parser.add_argument('-pen_mult', type=float, default=1, help='')
 parser.add_argument('-penfunc', type=str, default="l2",
@@ -593,14 +592,12 @@ parser.add_argument('-pendecay', type=float, default=1, help='initial learning r
 parser.add_argument('-lbp_iter', type=int, default=10, help='')
 parser.add_argument('-lbp_tol', type=float, default=0.001, help='')
 parser.add_argument('-randomize_lbp', action='store_true', help='')
-parser.add_argument('-reset_adam', action='store_true', help='')
-parser.add_argument('-z_iter', type=int, default=1, help='')
-parser.add_argument('-zx_iter', type=int, default=1, help='')
 
 parser.add_argument('-init', type=float, default=0.1, help='param init')
 parser.add_argument('-qinit', type=float, default=0.1, help='infnet param init')
 parser.add_argument('-lr', type=float, default=1, help='initial learning rate')
 parser.add_argument('-ilr', type=float, default=1, help='initial learning rate')
+parser.add_argument('-inf_iter', type=int, default=1, help='')
 parser.add_argument('-decay', type=float, default=0.5, help='initial learning rate')
 parser.add_argument('-clip', type=float, default=5, help='gradient clipping')
 parser.add_argument('-epochs', type=int, default=40, help='upper epoch limit')
@@ -628,6 +625,17 @@ def main(args, helper, cache, max_seqlen, max_verts, ntypes, trbatches, valbatch
         infctor = RNodeInfNet
     else:
         infctor = TNodeInfNet
+
+    if len(args.train_from) > 0:
+        saved_stuff = torch.load(args.train_from)
+        saved_args = saved_stuff["opt"]
+        model = HybEdgeModel(ntypes, max_verts, saved_args)
+        model.load_state_dict(saved_stuff["mod_sd"])
+        model = model.to(device)
+        print("evaling...")
+        vll, vnex, vntokes = exact_validate(valbatches, model, helper, device)
+        print("val avg-nll {:8.3f}".format(-vll/vnex))
+        exit()
 
     model = HybEdgeModel(ntypes, max_verts, args).to(device)
     if "exact" not in args.loss:
@@ -658,19 +666,33 @@ def main(args, helper, cache, max_seqlen, max_verts, ntypes, trbatches, valbatch
     lrdecay, pendecay = False, False
     if "exact" in args.loss:
         if args.optalg == "sgd":
-            popt1 = torch.optim.SGD(model.parameters(), lr=args.lr)
+            popt = torch.optim.SGD(model.parameters(), lr=args.lr)
+        elif args.optalg == "adagrad":
+            popt = torch.optim.Adagrad(model.parameters(), lr=args.lr,
+                                       initial_accumulator_value=0.1)
         else:
-            popt1 = torch.optim.Adam(model.parameters(), lr=args.lr)
+            popt = torch.optim.Adam(model.parameters(), lr=args.lr)
     else:
         if args.optalg == "sgd":
-            popt1 = torch.optim.SGD(model.parameters(), lr=args.lr)
-            popt2 = torch.optim.SGD(infnet.parameters(), lr=args.ilr)
+            popt = torch.optim.SGD(
+                [{"params": model.parameters(), "lr": args.lr},
+                 {"params": infnet.parameters(), "lr": args.ilr}])
+        elif args.optalg == "adagrad":
+            popt = torch.optim.Adagrad(
+                [{"params": model.parameters(), "lr": args.lr},
+                 {"params": infnet.parameters(), "lr": args.ilr}],
+                initial_accumulator_value=0.1)
         else:
-            popt1 = torch.optim.Adam(model.parameters(), lr=args.lr)
-            popt2 = torch.optim.Adam(infnet.parameters(), lr=args.ilr)
+            popt = torch.optim.Adam(
+                [{"params": model.parameters(), "lr": args.lr},
+                 {"params": infnet.parameters(), "lr": args.ilr}])
 
     if args.check_corr:
-        from utils import corr
+        import numpy as np
+
+        def corr(t1, t2):
+            return np.corrcoef(t1.data.cpu().numpy(), t2.data.cpu().numpy())[0][1]
+
         # pick a graph to check
         T, K = 10, args.K
         edges, nodeidxs, ne = get_hmm_stuff(T, args.markov_order, K)
@@ -693,7 +715,7 @@ def main(args, helper, cache, max_seqlen, max_verts, ntypes, trbatches, valbatch
                 [facbs[e] for e in range(nedges)]).transpose(0, 1) # 1 x nedge x K x K
             tau_u, tau_e = (tau_u.exp() + EPS), (tau_e.exp() + EPS)
 
-        for i in range(args.z_iter):
+        for i in range(args.inf_iter):
             with torch.no_grad(): # these functions are used in calc'ing the loss below too
                 pred_rho = infnet.q(edges, T) # nedges x K^2 logits
                 # should be 1 x T x K and 1 x nedges x K^2
@@ -701,7 +723,7 @@ def main(args, helper, cache, max_seqlen, max_verts, ntypes, trbatches, valbatch
                                                             penfunc=penfunc)
                 predtau_u, predtau_e = predtau_u.exp() + EPS, predtau_e.exp() + EPS
 
-            # i guess we'll just pick one entry from each
+            # pick one entry from each
             un_margs = tau_u[0][:, 0] # T
             bin_margs = tau_e[0][:, K-1, K-1] # nedges
             pred_un_margs = predtau_u[0][:, 0] # T
@@ -710,32 +732,29 @@ def main(args, helper, cache, max_seqlen, max_verts, ntypes, trbatches, valbatch
                   (corr(un_margs, pred_un_margs),
                    corr(bin_margs, pred_bin_margs)))
 
-            popt2.zero_grad()
+            popt.zero_grad()
             pred_rho = infnet.q(edges, T) # nedges x K^2 logits
             in_loss, ipen_loss = inner_lossz(pred_rho.view(1, -1), ed_lpots.view(1, -1), nodeidxs,
                                              K, ne, neginf, penfunc)
             in_loss = in_loss + args.pen_mult/npenterms * ipen_loss
             print("in_loss", in_loss.item())
             in_loss.backward()
-            clip_opt_params(popt2, args.clip)
-            popt2.step()
+            clip_opt_params(popt, args.clip)
+            popt.step()
         exit()
 
     bad_epochs = -1
     for ep in range(args.epochs):
+        #start = time.time()
         if args.loss == "exact":
-            ll, ntokes = exact_train(trbatches, model, popt1, helper, device, args)
-            print("Epoch {:3d} | train tru-ppl {:8.3f}".format(
-                ep, math.exp(-ll/ntokes)))
+            ll, nex, ntokes = exact_train(trbatches, model, popt, helper, device, args)
+            print("Epoch {:3d} | train avg-nll {:8.3f}".format(ep, -ll/nex))
             with torch.no_grad():
-                vll, vntokes = exact_validate(valbatches, model, helper, device)
-                print("Epoch {:3d} | val tru-ppl {:8.3f}".format(
-                    ep, math.exp(-vll/vntokes)))
-                # if ep == 4 and math.exp(-vll/vntokes) >= 280:
-                #     break
+                vll, vnex, vntokes = exact_validate(valbatches, model, helper, device)
+                print("Epoch {:3d} | val avg-nll {:8.3f}".format(ep, -vll/vnex))
             voloss = -vll
         elif args.loss == "lbp":
-            oloss, nex = lbp_train(trbatches, model, popt1, helper, device, args)
+            oloss, nex = lbp_train(trbatches, model, popt, helper, device, args)
             print("Epoch {:3d} | train out_loss {:8.3f}".format(
                 ep, oloss/nex))
             with torch.no_grad():
@@ -743,10 +762,13 @@ def main(args, helper, cache, max_seqlen, max_verts, ntypes, trbatches, valbatch
                 print("Epoch {:3d} | val out_loss {:8.3f} ".format(
                     ep, voloss/vnex))
         else: # infnet
-            oloss, iloss, ploss, nex = train_unsup_am(trbatches, model, infnet, popt1, popt2, cache,
+            oloss, iloss, ploss, nex = train_unsup_am(trbatches, model, infnet, popt, cache,
                                                       penfunc, neginf, device, args)
             print("Epoch {:3d} | train out_loss {:.3f} | train in_loss {:.3f}".format(
                 ep, oloss/nex, iloss/nex))
+            if args.optalg == "sgd":
+                lrs = [group['lr'] for group in popt.param_groups]
+                print("lrs:", lrs)
 
             with torch.no_grad():
                 voloss, vploss, vnex = validate_unsup_am(valbatches, model, infnet,
@@ -756,18 +778,9 @@ def main(args, helper, cache, max_seqlen, max_verts, ntypes, trbatches, valbatch
 
         if args.loss != "exact":
             with torch.no_grad():
-                # trull, ntokes = exact_validate(trbatches, model, helper, device)
-                # print("Epoch {:3d} | train tru-ppl {:.3f}".format(
-                #     ep, math.exp(-trull/ntokes)))
-
-                vll, vntokes = exact_validate(valbatches, model, helper, device)
-                print("Epoch {:3d} | val tru-ppl {:.3f}".format(
-                    ep, math.exp(-vll/vntokes)))
+                vll, vnex, vntokes = exact_validate(valbatches, model, helper, device)
+                print("Epoch {:3d} | val avg-nll {:.3f}".format(ep, -vll/vnex))
                 voloss = -vll
-
-            # trppl = math.exp(-trull/ntokes)
-            # if (ep == 0 and  trppl > 3000) or (ep > 0 and trppl > 1000):
-            #     break
 
         if voloss < best_loss:
             best_loss = voloss
@@ -776,15 +789,12 @@ def main(args, helper, cache, max_seqlen, max_verts, ntypes, trbatches, valbatch
             bestmodel.load_state_dict(model.state_dict())
             if bestinfnet is not None:
                 bestinfnet.load_state_dict(infnet.state_dict())
-            if len(args.save) > 0 and not args.grid:
-                print("saving model to", args.save)
-                torch.save({"opt": args, "mod_sd": bestmodel.state_dict(),
-                            "inf_sd": bestinfnet.state_dict() if bestinfnet is not None else None,
-                            "bestloss": bestloss}, args.save)
+            # if len(args.save) > 0:
+            #     print("saving model to", args.save)
+            #     torch.save({"opt": args, "mod_sd": model.state_dict(),
+            #                 "inf_sd": infnet.state_dict(), "bestloss": best_loss}, args.save)
         if (voloss >= prev_loss or lrdecay) and args.optalg == "sgd":
-            for group in popt1.param_groups:
-                group['lr'] *= args.decay
-            for group in popt2.param_groups:
+            for group in popt.param_groups:
                 group['lr'] *= args.decay
             #decay = True
         if (voloss >= prev_loss or pendecay):
@@ -793,20 +803,12 @@ def main(args, helper, cache, max_seqlen, max_verts, ntypes, trbatches, valbatch
             pendecay = True
 
         prev_loss = voloss
-        if ep >= 2 and math.exp(best_loss/vntokes) > 650:
-            break
+        # if args.lr < 1e-5:
+        #     break
         print("")
         bad_epochs += 1
         if bad_epochs >= 5:
             break
-        if args.reset_adam: #bad_epochs == 1:
-            print("resetting adam...")
-            for group in popt2.param_groups:
-                group['lr'] *= args.decay # not really decay
-        # if args.reset_adam and ep == 1: #bad_epochs == 1:
-        #     print("resetting adam...")
-        #     popt2 = torch.optim.Adam(infnet.parameters(), lr=args.ilr)
-
     return bestmodel, bestinfnet, best_loss
 
 
@@ -828,73 +830,15 @@ if __name__ == "__main__":
     max_seqlen = max(batch.size(0) for batch in corpus.train)
     max_verts = max_seqlen if args.use_length else args.markov_order
 
-    def get_pms(opts):
-        if opts.penfunc == "l2":
-            pms = [0.005, 0.01, 0.05, 0.1, 0.5, 1]
-        else:
-            pms = [0.1, 0.5, 1, 5, 10]
-        return pms
-
-    def get_vemb_size(opts):
-        return [opts.lemb_size]
-
-    hypers = OrderedDict({'optalg': ['adam'],
-                          'pendecay': [1, 0.9, 0.7, 0.5],
-                          'penfunc': ["l2", "js", "kl2", "kl1"],
-                          'init': [0.05],
-                          'qinit': [0.1],
-                          'lr': [0.005, 0.003, 0.001, 0.0005, 0.0001], # got rid of 0.01
-                          'ilr': [0.005, 0.003, 0.001, 0.0005], # got rid of 0.01
-                          'lemb_size': [200],
-                          'vemb_size': get_vemb_size,
-                          'qemb_size': [100],
-                          'q_hid_size': [64], #not used for transformer
-                          'q_heads': [2],
-                          'q_layers': [2],
-                          'clip': [1, 5],
-                          'pen_mult': [0.1, 0.5, 1, 5, 10],
-                          #'seed': list(range(100000))
-                          'seed': [70407],
-                          'reset_adam': [True, False],
-                          'z_iter': [1, 10, 20, 40, 50],
-                          'zx_iter': [1, 10, 20, 40, 50],
-                         })
-
+    torch.manual_seed(args.seed)
     cache = {}
 
-    if not args.grid:
-        args.nruns = 1
+    bestmodel, bestinfnet, runloss = main(
+        args, helper, cache, max_seqlen, max_verts, len(corpus.dictionary),
+        trbatches, valbatches)
+    if len(args.save) > 0:
+        print("saving model to", args.save)
+        torch.save({"opt": args, "mod_sd": bestmodel.state_dict(),
+                    "inf_sd": bestinfnet.state_dict() if bestinfnet is not None else None,
+                    "bestloss": bestloss}, args.save)
 
-    bestloss = float("inf")
-    donez = set()
-    for i in range(args.nruns):
-        torch.manual_seed(i) # seed for this run just so we randomly get new choices
-        if args.grid:
-            while True:
-                print("spinning!")
-                hypkey = []
-                for hyp, choices in hypers.items():
-                    if isinstance(choices, list):
-                        hypvals = choices
-                    else: # it's a function
-                        hypvals = choices(args)
-                    choice = hypvals[torch.randint(len(hypvals), (1,)).item()]
-                    args.__dict__[hyp] = choice
-                    hypkey.append(choice)
-                hypkey = tuple(hypkey)
-                if hypkey not in donez:
-                    donez.add(hypkey)
-                    break
-
-        bestmodel, bestinfnet, runloss = main(
-            args, helper, cache, max_seqlen, max_verts, len(corpus.dictionary),
-            trbatches, valbatches)
-        if runloss < bestloss:
-            bestloss = runloss
-            if len(args.save) > 0:
-                print("saving model to", args.save)
-                torch.save({"opt": args, "mod_sd": bestmodel.state_dict(),
-                            "inf_sd": bestinfnet.state_dict() if bestinfnet is not None else None,
-                            "bestloss": bestloss}, args.save)
-        print()
-        print()

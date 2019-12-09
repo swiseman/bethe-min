@@ -10,8 +10,7 @@ from torch.nn.functional import softplus
 
 from torchvision.models.resnet import BasicBlock, Bottleneck, conv1x1
 
-#from rbm_infnets import RBMInfConvNet, RBMRNNProdInfNet, RBMConvProdInfNet
-from rbm_infnets import SeqInfNet, SeqJustVisInfNet, DblSeqInfNet, TwodJustVisInfNet
+from rbm_infnets import SeqInfNet
 
 from utils import clip_opt_params, get_rbm_ne, batch_kl, get_rbm_edges
 from lbp_util import dolbp
@@ -538,25 +537,18 @@ def moar_validate(corpus, model, device, args, do_ais=False, b_A=None):
 
 
 parser = argparse.ArgumentParser(description='')
-
-parser.add_argument('-bin_mnist_dir', type=str, default='/scratch/data/binarized_mnist/',
-                    help='')
-parser.add_argument('-use_kuleshov_data', action='store_true', help='')
-
-parser.add_argument('-nhid', type=int, default=64, help='')
+parser.add_argument('-nhid', type=int, default=100, help='')
 parser.add_argument('-init_strat', type=str, default='xavier',
                     choices=["xavier", "gaussian", "uniform"], help='')
 
-parser.add_argument('-optalg', type=str, default='sgd',
+parser.add_argument('-optalg', type=str, default='adam',
                     choices=["sgd", "adagrad", "adam"], help='')
 parser.add_argument('-pen_mult', type=float, default=1, help='')
-parser.add_argument('-penfunc', type=str, default="l2",
+parser.add_argument('-penfunc', type=str, default="kl2",
                     choices=["l2", "l1", "js", "kl1", "kl2"], help='')
 
-parser.add_argument('-infarch', type=str, default="transformer")
-                    #choices=["yoon", "rnn", "transformer"], help='')
+parser.add_argument('-infarch', type=str, default="rnn")
 
-parser.add_argument('-kW', type=int, default=3, help='')
 parser.add_argument('-q_layers', type=int, default=2, help='')
 parser.add_argument('-q_heads', type=int, default=4, help='')
 parser.add_argument('-qemb_sz', type=int, default=50, help='')
@@ -570,7 +562,7 @@ parser.add_argument('-ilr', type=float, default=0.001, help='initial learning ra
 parser.add_argument('-inf_iter', type=int, default=1, help='')
 parser.add_argument('-lrdecay', type=float, default=0.5, help='initial learning rate')
 parser.add_argument('-pendecay', type=float, default=1, help='initial learning rate')
-parser.add_argument('-clip', type=float, default=5, help='gradient clipping')
+parser.add_argument('-clip', type=float, default=1, help='gradient clipping')
 parser.add_argument('-epochs', type=int, default=40, help='upper epoch limit')
 parser.add_argument('-bsz', type=int, default=32, help='batch size')
 parser.add_argument('-seed', type=int, default=1111, help='random seed')
@@ -586,13 +578,11 @@ parser.add_argument('-reset_adam', action='store_true', help='')
 
 parser.add_argument('-do_ais', action='store_true', help='')
 parser.add_argument('-nais_chains', type=int, default=10, help='')
-parser.add_argument('-nais_steps', type=int, default=10000, help='')
+parser.add_argument('-nais_steps', type=int, default=1000, help='')
 
 parser.add_argument('-log_interval', type=int, default=200, help='report interval')
 parser.add_argument('-save', type=str, default='', help='path to save the final model')
 parser.add_argument('-train_from', type=str, default='', help='')
-parser.add_argument('-nruns', type=int, default=100, help='')
-parser.add_argument('-grid', action='store_true', help='')
 parser.add_argument('-check_corr', action='store_true', help='')
 
 def main(args, trdat, valdat, nvis, ne):
@@ -603,16 +593,6 @@ def main(args, trdat, valdat, nvis, ne):
         if not args.cuda:
             print("WARNING: You have a CUDA device, so you should probably run with --cuda")
     device = torch.device("cuda" if args.cuda else "cpu")
-
-    def get_infnet():
-        if "justvis" in args.infarch:
-            return SeqJustVisInfNet(nvis, args)
-        elif "dbl" in args.infarch:
-            return DblSeqInfNet(nvis, args)
-        elif "2d" in args.infarch:
-            return TwodJustVisInfNet(nvis, args)
-        else:
-            return SeqInfNet(nvis, args)
 
     if len(args.train_from) > 0:
         saved_stuff = torch.load(args.train_from)
@@ -625,12 +605,9 @@ def main(args, trdat, valdat, nvis, ne):
         print("Epoch {:3d} | val npll {:.3f}".format(
             0, valnpll/vnexagain))
         exit()
-        # infnet = get_infnet()
-        # infnet.load_state_dict(saved_stuff["inf_sd"])
-        # infnet = infnet.to(device)
     else:
         model = RBM(nvis, args).to(device)
-        infnet = get_infnet()
+        infnet = SeqInfNet(nvis, args)
         infnet = infnet.to(device)
 
     ne = ne.to(device)
@@ -639,7 +616,7 @@ def main(args, trdat, valdat, nvis, ne):
         edges = get_rbm_edges(nvis, args.nhid)#.to(device)
 
     bestmodel = RBM(nvis, args)
-    bestinfnet = get_infnet()
+    bestinfnet = SeqInfNet(nvis, args)
 
     if args.penfunc == "l2":
         penfunc = lambda x, y: ((x-y)*(x-y)).sum(-1)
@@ -692,7 +669,7 @@ def main(args, trdat, valdat, nvis, ne):
                 predtau_u, predtau_e, _ = get_taus_and_pens(pred_rho, V, H, penfunc=penfunc)
                 predtau_u, predtau_e = predtau_u.exp() + EPS, predtau_e.exp() + EPS
 
-            # i guess we'll just pick one entry from each
+            # just pick one entry from each
             un_margs = tau_u[0][:, 1] # V+H
             bin_margs = tau_e[0][:, 1, 1] # nedges
             pred_un_margs = predtau_u[0][:, 1] # T
@@ -711,7 +688,7 @@ def main(args, trdat, valdat, nvis, ne):
             popt2.step()
         exit()
 
-    bad_epochs = -1
+    best_loss = float("inf")
     for ep in range(args.epochs):
         if args.training == "pcd":
             oloss, nex = train_pcd(trdat, model, popt1, device, args)
@@ -751,10 +728,6 @@ def main(args, trdat, valdat, nvis, ne):
             print("updating best model")
             bestmodel.load_state_dict(model.state_dict())
             bestinfnet.load_state_dict(infnet.state_dict())
-            if len(args.save) > 0 and not args.grid:
-                print("saving model to", args.save)
-                torch.save({"opt": args, "mod_sd": bestmodel.state_dict(),
-                            "inf_sd": bestinfnet.state_dict(), "bestloss": bestloss}, args.save)
 
         if (voloss >= prev_loss or lrdecay) and args.optalg == "sgd":
             for group in popt1.param_groups:
@@ -771,9 +744,6 @@ def main(args, trdat, valdat, nvis, ne):
         if args.lr < 1e-5:
             break
         print("")
-        bad_epochs += 1
-        if bad_epochs >= 10:
-            break
         # if args.reset_adam:
         #     print("resetting adam...")
         #     popt2 = torch.optim.Adam(infnet.parameters(), lr=args.ilr)
@@ -786,21 +756,12 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-    if args.use_kuleshov_data:
-        # Xtr, _, Xval, _, _, _ = data.load_digits()
-        # Xtr = torch.from_numpy(Xtr).squeeze(1).round() # N x dim1 x dim2
-        # Xval = torch.from_numpy(Xval).squeeze(1).round() # N x dim1 x dim2
-        Xtr, Xval = torch.load("kuleshov_digits.pt") # each is N x dim1 x dim2; in [0, 1]
-        Xtr, Xval = Xtr.round(), Xval.round()
-        nvis = Xtr.size(1) * Xtr.size(2)
-    else:
-        with open(os.path.join(args.bin_mnist_dir, "binarized_mnist_train.amat")) as f:
-            Xtr = torch.stack([torch.Tensor([int(v) for v in line.strip().split()]) for line in f])
-
-        with open(os.path.join(args.bin_mnist_dir, "binarized_mnist_valid.amat")) as f:
-            Xval = torch.stack([torch.Tensor([int(v) for v in line.strip().split()]) for line in f])
-
-        nvis = Xtr.size(1)
+    # Xtr, _, Xval, _, _, _ = data.load_digits()
+    # Xtr = torch.from_numpy(Xtr).squeeze(1).round() # N x dim1 x dim2
+    # Xval = torch.from_numpy(Xval).squeeze(1).round() # N x dim1 x dim2
+    Xtr, Xval = torch.load("kuleshov_digits.pt") # each is N x dim1 x dim2; in [0, 1]
+    Xtr, Xval = Xtr.round(), Xval.round()
+    nvis = Xtr.size(1) * Xtr.size(2)
 
     print("Xtr size", Xtr.size())
 
@@ -813,95 +774,11 @@ if __name__ == "__main__":
     ne = get_rbm_ne(nvis, args.nhid) # 1 x V+H x 2 (last dimension is just repeated)
     ne = ne + 1 # account for unary factors
 
-    #assert False
-
-    def get_pms(opts):
-        if opts.penfunc == "l2":
-            #pms = [0.005, 0.01, 0.05, 0.1, 0.5, 1]
-            pms = [0.0001, 0.001, 0.01, 0.1, 1, 10]
-        else:
-            #pms = [0.1, 0.5, 1, 5, 10]
-            pms = [0.0001, 0.001, 0.01, 0.1, 1, 10]
-        return pms
-
-    def get_q_hidsz(opts):
-        if "rnn" in opts.infarch:
-            return [64, 100, 200, 300, 600]
-        if "justvis" in opts.infarch or "dbl" in opts.infarch:
-            return [opts.qemb_sz]
-        # just for non-rnn single sequence....
-        return [2*opts.qemb_sz]
-
-    # hypers = OrderedDict({'optalg': ['adam'],
-    #                       'pendecay': [1, 0.9, 0.7, 0.5],
-    #                       'penfunc': ["l2", "js", "kl2", "kl1"],
-    #                       #"infarch": ["yoon", "transformer", "yoonjustvis", "transformerjustvis"],
-    #                       #'infarch': ["rnn", "rnnjustvis"],
-    #                       #'infarch': ["cnn", "cnnjustvis"],
-    #                       #'infarch': ["rnn", "rnndbl"],
-    #                       'infarch': ["transformer", "transformerdbl"],
-    #                       'init_strat': ["xavier", "gaussian", "uniform"],
-    #                       'lr': [0.003, 0.001, 0.0003, 0.0001, 0.00003],
-    #                       'ilr': [0.003, 0.001, 0.0003, 0.0001, 0.00003],
-    #                       'qemb_sz': [64, 100, 150, 200, 300],
-    #                       'q_hid_size': get_q_hidsz,
-    #                       'q_layers': list(range(1, 6)),
-    #                       'q_heads': list(range(1, 6)),
-    #                       'clip': [1, 5, 10],
-    #                       'pen_mult': get_pms,
-    #                       'seed': list(range(100000)),
-    #                       'init': [0.1, 0.05, 0.01],
-    #                       'qinit': [0.1, 0.05, 0.01],
-    #                      })
-
-
-    hypers = OrderedDict({'optalg': ['adam'],
-                          'pendecay': [1, 0.9, 0.7, 0.5],
-                          'penfunc': ["l2", "js", "kl2", "kl1"],
-                          'infarch': ["transformer", "transformerdbl"],
-                          'init_strat': ["xavier", "gaussian"],
-                          'lr': [0.005, 0.003, 0.001, 0.0005, 0.0001],
-                          'ilr': [0.005, 0.003, 0.001, 0.0005, 0.0001],
-                          'qemb_sz': [64, 100, 150],
-                          'q_hid_size': get_q_hidsz,
-                          'q_layers': [1, 2, 3], #list(range(1, 6)),
-                          'q_heads': [1, 2, 3], #list(range(1, 6)),
-                          'clip': [1, 5],
-                          'pen_mult': [0.001, 0.01, 0.1, 0.5, 1, 5, 10],
-                          'seed': list(range(100000)),
-                          'init': [0.1, 0.05],
-                          'qinit': [0.1],
-                          'reset_adam': [True, False],
-                          'inf_iter': [1, 10, 20, 40, 50],
-                         })
-
     torch.manual_seed(args.seed)
 
-    if not args.grid:
-        args.nruns = 1
+    bestmodel, bestinfnet, runloss = main(args, trdat, valdat, nvis, ne)
 
-    bestloss = float("inf")
-    for _ in range(args.nruns):
-        if args.grid:
-            for hyp, choices in hypers.items():
-                if isinstance(choices, list):
-                    hypvals = choices
-                else: # it's a function
-                    hypvals = choices(args)
-                choice = hypvals[torch.randint(len(hypvals), (1,)).item()]
-                args.__dict__[hyp] = choice
-
-        #try:
-        bestmodel, bestinfnet, runloss = main(args, trdat, valdat, nvis, ne)
-        # except RuntimeError: # presumably oom
-        #     runloss = float("inf")
-        #     torch.cuda.empty_cache()
-        #     print("skipping b/c of oom")
-        if runloss < bestloss:
-            bestloss = runloss
-            if len(args.save) > 0:
-                print("saving model to", args.save)
-                torch.save({"opt": args, "mod_sd": bestmodel.state_dict(),
-                            "inf_sd": bestinfnet.state_dict(), "bestloss": bestloss}, args.save)
-        print()
-        print()
+    if len(args.save) > 0:
+        print("saving model to", args.save)
+        torch.save({"opt": args, "mod_sd": bestmodel.state_dict(),
+                    "inf_sd": bestinfnet.state_dict(), "bestloss": runloss}, args.save)
