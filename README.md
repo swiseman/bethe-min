@@ -15,5 +15,5 @@ python pen_uhmm.py -cuda -K 30 -bsz 32 -dropout 0.3 -ilr 0.0003 -infarch rnnnode
 
 To compare marginals for a 10x10 Ising model averaged across 5 iterations:
 ```
-python ising_marginals --gpu 0 --n 10 --exp_iters 5
+python ising_marginals.py --gpu 0 --n 10 --exp_iters 5
 ```
