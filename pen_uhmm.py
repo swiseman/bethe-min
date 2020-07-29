@@ -587,7 +587,7 @@ parser.add_argument('-loss', type=str, default='alt2',
                     choices=["exact", "lbp", "alt2", "alt3"], help='')
 parser.add_argument('-pen_mult', type=float, default=1, help='')
 parser.add_argument('-penfunc', type=str, default="l2",
-                    choices=["l2", "l1", "js", "kl1", "kl2"], help='')
+                    choices=["l2", "l1", "kl1", "kl2"], help='')
 parser.add_argument('-pendecay', type=float, default=1, help='initial learning rate')
 parser.add_argument('-lbp_iter', type=int, default=10, help='')
 parser.add_argument('-lbp_tol', type=float, default=0.001, help='')
@@ -651,8 +651,6 @@ def main(args, helper, cache, max_seqlen, max_verts, ntypes, trbatches, valbatch
         penfunc = lambda x, y: ((x-y)*(x-y)).sum(-1)
     elif args.penfunc == "l1":
         penfunc = lambda x, y: (x-y).abs().sum(-1)
-    elif args.penfunc == "js":
-        penfunc = lambda x, y: 0.5*(batch_kl(x, y) + batch_kl(y, x))
     elif args.penfunc == "kl1":
         penfunc = lambda x, y: batch_kl(x, y)
     elif args.penfunc == "kl2":
