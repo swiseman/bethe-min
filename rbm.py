@@ -545,7 +545,7 @@ parser.add_argument('-optalg', type=str, default='adam',
                     choices=["sgd", "adagrad", "adam"], help='')
 parser.add_argument('-pen_mult', type=float, default=1, help='')
 parser.add_argument('-penfunc', type=str, default="kl2",
-                    choices=["l2", "l1", "js", "kl1", "kl2"], help='')
+                    choices=["l2", "l1", "kl1", "kl2"], help='')
 
 parser.add_argument('-infarch', type=str, default="rnn")
 
@@ -622,8 +622,6 @@ def main(args, trdat, valdat, nvis, ne):
         penfunc = lambda x, y: ((x-y)*(x-y)).sum(-1)
     elif args.penfunc == "l1":
         penfunc = lambda x, y: (x-y).abs().sum(-1)
-    elif args.penfunc == "js":
-        penfunc = lambda x, y: 0.5*(batch_kl(x, y) + batch_kl(y, x))
     elif args.penfunc == "kl1":
         penfunc = lambda x, y: batch_kl(x, y)
     elif args.penfunc == "kl2":
